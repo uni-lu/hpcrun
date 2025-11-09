@@ -1,0 +1,7 @@
+```
+TELERUN_SSH_HOST=access-aion.uni.lu
+TELERUN_SSH_USER=whuang
+TELERUN_SSH_PORT=8022
+TELERUN_SSH_KEY_PATH=~/.ssh/id_ed25519
+TELERUN_SSH_RSYNC=true
+```
