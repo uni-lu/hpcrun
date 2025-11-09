@@ -1,0 +1,5 @@
+venv/
+.env
+telerun.py
+*.yml
+.telerun_logs/
