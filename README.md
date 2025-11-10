@@ -19,7 +19,7 @@
 ## 1) Requirements
 
 * Python 3.9+ with:
-  * `pyyaml`, `paramiko`, `dotenv`
+  * `PyYAML`, `paramiko`, `python-dotenv`
 * (Remote builds/runs) SSH access to your cluster
 
 Install Python deps (locally or in a venv):
@@ -94,18 +94,14 @@ pipelines:
   benchmark:
     - name: sync to cluster
       kind: sync
-      remote: false
-      continue_on_error: false
+      continue_en_error: false
     - name: remote build
       kind: build
-      remote: true
     - name: run small
       kind: run
-      remote: true
       test: small
     - name: evaluate all
       kind: eval
-      remote: true
       submit: true                       # submit the performance result after evalution phase.
 ```
 
@@ -114,25 +110,25 @@ pipelines:
 ### Sync
 
 ```bash
-./telerun.py sync --remote
+./telerun.py sync
 ```
 
 ### Build
 
 ```bash
-./telerun.py build --remote
+./telerun.py build
 ```
 
 ### Run
 
 ```bash
-./telerun.py run --remote
+./telerun.py run
 ```
 
 ### Evaluate all tests (correctness + performance)
 
 ```bash
-./telerun.py eval --remote
+./telerun.py eval
 ```
 
 The `eval` step:
@@ -171,17 +167,31 @@ pipelines:
 
 ## 5) Leaderboard
 
-In order to submit you solution to leaderboard, add `--submit` when submit:
-```sh
-./telerun.py eval --remote --submit
+To submit your evaluation results to the leaderboard, add the `--submit` flag when running the evaluation:
+
+```bash
+./telerun.py eval --submit
 ```
 
-You can check the result you've submitted afterward, by using this command:
-```sh
-./telerun.py leaderboard <labname>
+This command will automatically upload your latest benchmark results to the online leaderboard. After submission, you can view the current standings for your lab with:
+
+```bash
+./telerun.py leaderboard <lab_name>
 ```
+
 For example:
 
-```sh
+```bash
 ./telerun.py leaderboard "C++ Hello World Lab"
+```
+
+```
+============================================================
+🏆 Leaderboard for lab: C++ Hello World Lab
+============================================================
+Rank  User               Runtime (ms)            Timestamp
+------------------------------------------------------------
+1     Weezing                   1.357  2025-11-10 16:50:35
+2     Pikachu                   1.376  2025-11-10 17:49:44
+============================================================
 ```

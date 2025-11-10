@@ -34,21 +34,17 @@ pipelines:
   benchmark:
     - name: sync to cluster
       kind: sync
-      remote: false
       continue_on_error: false
 
     - name: remote build
       kind: build
-      remote: true
 
     - name: run small
       kind: run
-      remote: true
       test: small
 
     - name: evaluate all
       kind: eval
-      remote: true
       submit: true
 
 # env:
