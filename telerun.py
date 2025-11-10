@@ -28,10 +28,9 @@ import dataclasses
 import json
 import os
 import shlex
-import signal
 import subprocess as sp
 import sys
-import tarfile
+import re
 import tempfile
 import textwrap
 import time
@@ -42,7 +41,8 @@ import paramiko
 
 LOG_DIR = Path(".telerun_logs")
 LOG_DIR.mkdir(exist_ok=True)
-DEBUG = True
+ANSI_RE = re.compile(r"\x1B\[[0-9;]*[A-Za-z]")  # strip terminal color codes
+DEBUG = False
 
 
 # ------------------------------
@@ -55,6 +55,12 @@ class ShellError(RuntimeError):
         self.returncode = returncode
         self.where = where
 
+def normalize(s: str) -> str:
+    # remove ANSI, normalize line endings, trim trailing spaces per line
+    s = ANSI_RE.sub("", s)
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [ln.rstrip() for ln in s.split("\n")]
+    return "\n".join(lines).rstrip() + "\n"  # keep a single trailing newline
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -87,7 +93,7 @@ def write_yaml(path: Path, data: Dict[str, Any]) -> None:
 
 def print_box(title: str) -> None:
     bar = "=" * len(title)
-    print(f"\n{bar}\n{title}\n{bar}")
+    print(f"{bar}\n{title}\n{bar}")
 
 # --- .env helpers ---
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -185,6 +191,19 @@ class TestCase:
     expected_output: Optional[str] = None  # inline expected
     expected_file: Optional[str] = None  # or file path
 
+@dataclasses.dataclass
+class PipeStep:
+    name: str
+    kind: str                    # "sync" | "build" | "run" | "eval" | "shell"
+    remote: bool = False
+    test: Optional[str] = None   # for kind=="run"
+    env: Dict[str, str] = dataclasses.field(default_factory=dict)
+    continue_on_error: bool = False
+
+@dataclasses.dataclass
+class Pipeline:
+    name: str
+    steps: List[PipeStep]
 
 @dataclasses.dataclass
 class TelerunConfig:
@@ -197,6 +216,7 @@ class TelerunConfig:
     thresholds: Thresholds = dataclasses.field(default_factory=Thresholds)
     tests: List[TestCase] = dataclasses.field(default_factory=list)
     env: Dict[str, str] = dataclasses.field(default_factory=dict)
+    pipelines: Dict[str, Pipeline] = dataclasses.field(default_factory=dict)
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "TelerunConfig":
@@ -204,6 +224,11 @@ class TelerunConfig:
         ssh = SSHConfig.from_env()
         thr = Thresholds(**(d.get("thresholds", {}) or {}))
         tests = [TestCase(**x) for x in d.get("tests", [])]
+        pipes: Dict[str, Pipeline] = {}
+
+        for pname, raw_steps in (d.get("pipelines") or {}).items():
+            steps = [PipeStep(**s) for s in raw_steps]
+            pipes[pname] = Pipeline(name=pname, steps=steps)
         return TelerunConfig(
             lab_name=d.get("lab_name", ""),
             source_code_loc=d.get("source_code_loc", "."),
@@ -213,6 +238,7 @@ class TelerunConfig:
             slurm=SlurmConfig(**(d.get("slurm", {}) or {})),
             thresholds=thr,
             tests=tests,
+            pipelines=pipes,
             env=d.get("env", {}),
         )
 
@@ -252,7 +278,7 @@ class Streamer:
         if proc.returncode != 0:
             raise ShellError(cmd, proc.returncode, where="local")
         return proc.returncode, elapsed
-    def run_remote(self, ssh: SSHConfig, cmd: str) -> Tuple[int, float]:
+    def run_remote(self, ssh: SSHConfig, cmd: str) -> Tuple[int, float, str]:
         start = time.perf_counter()
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -262,31 +288,33 @@ class Streamer:
             username=ssh.user,
             key_filename=ssh.key_path,
         )
+        buf = []
         try:
             chan = client.get_transport().open_session() # type: ignore
             chan.get_pty()
             chan.exec_command(cmd)
-            log_file = log_path("remote")
-            with log_file.open("w", encoding="utf-8", errors="ignore") as f:
-                while True:
-                    if chan.recv_ready():
-                        data = chan.recv(4096).decode(errors="ignore")
-                        sys.stdout.write(data)
-                        f.write(data)
-                    if chan.recv_stderr_ready():
-                        data = chan.recv_stderr(4096).decode(errors="ignore")
-                        sys.stdout.write(data)
-                        f.write(data)
-                    if chan.exit_status_ready():
-                        break
-                    time.sleep(0.02)
+            # log_file = log_path("remote")
+            # with log_file.open("w", encoding="utf-8", errors="ignore") as f:
+            while True:
+                if chan.recv_ready():
+                    data = chan.recv(4096).decode(errors="ignore")
+                    buf.append(data)
+                    # f.write(data)
+                if chan.recv_stderr_ready():
+                    data = chan.recv_stderr(4096).decode(errors="ignore")
+                    buf.append(data)
+                    # f.write(data)
+                if chan.exit_status_ready():
+                    break
+                time.sleep(0.02)
             rc = chan.recv_exit_status()
         finally:
             client.close()
         elapsed = time.perf_counter() - start
+        output = "".join(buf)
         if rc != 0:
             raise ShellError(cmd, rc, where=f"ssh:{ssh.host}")
-        return rc, elapsed
+        return rc, elapsed, output
 
 
 # ------------------------------
@@ -337,7 +365,7 @@ class Telerun:
         src = Path(self.cfg.source_code_loc).resolve()
         if not src.exists():
             raise SystemExit(f"source_code_loc not found: {src}")
-        dest = f"{ssh.user+'@' if ssh.user else ''}{ssh.host}:{os.path.join("/home/users/", ssh.user, ssh.remote_dir.rstrip('/'))}"  # user@host:/dir
+        dest = f"{ssh.user+'@' if ssh.user else ''}{ssh.host}:{os.path.join('/home/users/', ssh.user, ssh.remote_dir.rstrip('/'))}"  # user@host:/dir
         key_opt = f"-e \"ssh -p {ssh.port} -i {shlex.quote(ssh.key_path)}\"" if ssh.key_path else f"-e \"ssh -p {ssh.port}\""
         cmd = f"rsync -az --exclude-from '.rsyncignore' {key_opt} {shlex.quote(str(src))}/ {shlex.quote(dest)}/"
         if DEBUG: print_box(f"command: {cmd}") 
@@ -366,13 +394,14 @@ class Telerun:
             if slurm_prefix:
                 remote_cmd = f"cd {shlex.quote(ssh.remote_dir)} && {slurm_prefix} bash -lc {shlex.quote(cmd)}"
             print_box(f"REMOTE build on {ssh.host}{' via SLURM' if slurm_prefix else ''}")
-            self.streamer.run_remote(ssh, remote_cmd)
+            _, _, output = self.streamer.run_remote(ssh, remote_cmd)
+            print(output)
         else:
             print_box("LOCAL build")
             self.streamer.run_local(cmd, cwd=cwd, env=env)
 
     # --- run ---
-    def _compose_run_cmd(self, which: str, test: TestCase, remote: bool) -> Tuple[str, Optional[bytes]]:
+    def _compose_run_cmd(self, which: str, test: TestCase, remote: bool, perf: bool) -> Tuple[str, Optional[bytes]]:
         b = self.cfg.build
         stdin_bytes: Optional[bytes] = None
         bin_path: Optional[str] = None
@@ -393,9 +422,19 @@ class Telerun:
         elif test.input_file:
             stdin_bytes = Path(test.input_file).read_bytes()
 
+        warmup = 3
+        runs = 10
         cmd = " ".join(shlex.quote(a) for a in argv)
-        cmd = f"source {shlex.quote("scripts/module.sh")}"+ " && time -p " + cmd
-        if DEBUG: print(argv)
+        cmd = (
+            f"source {shlex.quote('scripts/module.sh')} && "
+            + (
+                f"./bin/hyperfine -N --warmup {warmup} --runs {runs} "
+                f"--export-json result.json -- '{cmd}' > /dev/null"
+                if perf
+                else f"{cmd}"
+            )
+            + (f" && cat result.json" if perf else "")
+        )
         if remote:
             ssh = self.cfg.ssh
             if not ssh.host or not ssh.remote_dir:
@@ -407,9 +446,9 @@ class Telerun:
                 cmd = f"cd {shlex.quote(ssh.remote_dir)} && {cmd}"
         return cmd, stdin_bytes
 
-    def run_once(self, which: str, test: TestCase, remote: bool = False) -> Tuple[str, float]:
-        cmd, stdin_bytes = self._compose_run_cmd(which, test, remote)
-        print_box(f"RUN {which} :: {test.name}")
+    def run_once(self, which: str, test: TestCase, remote: bool = False, perf: bool = False) -> Tuple[str, float]:
+        cmd, stdin_bytes = self._compose_run_cmd(which, test, remote, perf)
+        print_box(f"{'RUN' if not perf else 'PERF'} {which} :: {test.name}")
         start = time.perf_counter()
         if remote:
             # Remote streaming does not handle stdin easily here; simple fallback via echo/heredoc
@@ -431,7 +470,8 @@ class Telerun:
                     cmd = f"cat {shlex.quote(tmp_name)} | {cmd}; rm -f {shlex.quote(tmp_name)}"
                 finally:
                     Path(tmp_name).unlink(missing_ok=True)
-            rc, elapsed = self.streamer.run_remote(self.cfg.ssh, cmd)
+            rc, elapsed, output = self.streamer.run_remote(self.cfg.ssh, cmd)
+            return output, elapsed
         else:
             # Local with streaming + optional stdin
             env = {**os.environ, **(self.cfg.env or {})}
@@ -462,8 +502,6 @@ class Telerun:
             if proc.returncode != 0:
                 raise ShellError(cmd, proc.returncode)
             return "".join(out_lines), elapsed
-        # If we ran remote, we only have timing; correctness evaluation will re-run via implementation/evaluation collection.
-        return "", elapsed
 
     # --- evaluation ---
     def _expected_text(self, t: TestCase) -> Optional[str]:
@@ -474,7 +512,7 @@ class Telerun:
         return None
 
     def eval_test(self, t: TestCase, remote: bool = False) -> Dict[str, Any]:
-        impl_out, impl_time = self.run_once("implementation", t, remote=remote)
+        impl_out, _ = self.run_once("implementation", t, remote=remote)
         expected = self._expected_text(t)
         correctness = None
         details = ""
@@ -487,7 +525,8 @@ class Telerun:
         else:
             # Simple diff style compare
             if self.cfg.thresholds.correctness == "diff":
-                correctness = (eval_out == expected)
+                correctness = (normalize(impl_out) == normalize(expected))
+
                 if not correctness:
                     details = "output differs from expected"
             else:
@@ -504,6 +543,9 @@ class Telerun:
                     except sp.CalledProcessError:
                         correctness = False
                         details = f"checker failed: {cmd}"
+        benchmark_result, _  = self.run_once("implementation", t, remote=remote, perf=True)
+        result_json_data = json.loads(benchmark_result)
+        impl_time = result_json_data["results"][0]["mean"]
         perf_ok = True
         perf_limit = self.cfg.thresholds.perf_ms
         if perf_limit is not None:
@@ -512,74 +554,55 @@ class Telerun:
             "test": t.name,
             "correct": bool(correctness),
             "perf_ok": bool(perf_ok),
-            "runtime_ms": round(impl_time * 1000.0, 2),
+            "runtime_ms": round(impl_time * 1000.0, 6),
             "details": details,
         }
+    
+    def run_pipeline(self, name: str) -> None:
+        if name not in self.cfg.pipelines:
+            raise SystemExit(f"Unknown pipeline: {name}")
+        pl = self.cfg.pipelines[name]
+        print_box(f"PIPELINE :: {pl.name}")
 
+        for i, step in enumerate(pl.steps, 1):
+            print_box(f"[{i}/{len(pl.steps)}] {step.name} ({step.kind})")
+            try:
+                # merge step env into cfg for this step
+                saved_env = dict(self.cfg.env)
+                self.cfg.env.update(step.env or {})
 
-# ------------------------------
-# CLI
-# ------------------------------
-EXAMPLE_CONFIG_YAML = textwrap.dedent(
-    """
-    # telerun.yaml — example configuration (Python or C/C++)
-    lab_name: "Example Lab"
-    source_code_loc: "."  # path where build + run happen
+                if step.kind == "sync":
+                    self.rsync()
 
-    build:
-      # Either provide a build script (recommended)…
-      # build_script: scripts/build.sh
+                elif step.kind == "build":
+                    self.build(remote=step.remote)
 
-      # …or an explicit list of compile commands to be joined with &&
-      compile_commands:
-        - make clean
-        - make all
+                elif step.kind == "run":
+                    # choose test or default 1st
+                    t = next((t for t in self.cfg.tests if t.name == step.test), None)
+                    if t is None:
+                        if step.test: raise SystemExit(f"Unknown test: {step.test}")
+                        if not self.cfg.tests: raise SystemExit("No tests configured")
+                        t = self.cfg.tests[0]
+                    out, secs = self.run_once("implementation", t, remote=step.remote)
+                    print_box("OUTPUT")
+                    print(out)
 
+                elif step.kind == "eval":
+                    for t in self.cfg.tests:
+                        res = self.eval_test(t, remote=step.remote)
+                        print(f"{t.name}: correct={res['correct']} perf_ok={res['perf_ok']} time={res['runtime_ms']} ms")
 
+                else:
+                    raise SystemExit(f"Unsupported step kind: {step.kind}")
 
-    thresholds:
-      correctness: diff      # or e.g. "python3 compare.py {expected} {actual}"
-      perf_ms: 2000          # fail if runtime exceeds 2s per test
+            except Exception as e:
+                print(f"[pipeline] step failed: {e}")
+                if not step.continue_on_error:
+                    raise
+            finally:
+                self.cfg.env = saved_env  # restore
 
-    # Optional SSH config if you want to build/run remotely
-    ssh:
-      host: null             # e.g. hpc.mycluster.edu
-      user: null
-      port: 22
-      key_path: null         # e.g. ~/.ssh/id_ed25519
-      remote_dir: null       # e.g. /home/me/labs/example-lab
-      rsync: true
-
-    # Optional SLURM settings (used only when running remotely)
-    slurm:
-      enabled: false
-      partition: null        # e.g. "short"
-      time: "00:05:00"
-      nodes: 1
-      ntasks: 1
-      cpus_per_task: 1
-      gpus: null
-      mem: "2G"
-      account: null
-      qos: null
-      extra_args: []         # e.g. ["--exclusive"]
-
-    # Environment variables to set during local runs/builds
-    env:
-      OMP_NUM_THREADS: "1"
-
-    tests:
-      - name: small
-        args: ["--n", "1000"]
-        stdin: null
-        expected_output: "42 "   # or use expected_file: path/to/file
-
-      - name: bigger
-        args: ["--n", "200000"]
-        input_file: null
-        expected_output: "84"
-    """
-)
 
 # A ready-to-use C++ lab example
 EXAMPLE_CPP_YAML = textwrap.dedent(
@@ -701,6 +724,7 @@ def cmd_eval(args: argparse.Namespace) -> None:
         print_box(f"{t.name}: {'OK' if res['correct'] else 'WRONG'} | {'FAST' if res['perf_ok'] else 'SLOW'} | {res['runtime_ms']} ms")
         if res["details"]:
             print(res["details"])
+        print()
     # Summary
     ok = sum(1 for r in results if r["correct"]) 
     fast = sum(1 for r in results if r["perf_ok"]) 
@@ -708,6 +732,10 @@ def cmd_eval(args: argparse.Namespace) -> None:
     print(json.dumps(results, indent=2))
     print(f"\nCorrect: {ok}/{len(results)} | Perf OK: {fast}/{len(results)}")
 
+def cmd_pipe(args: argparse.Namespace) -> None:
+    cfg = load_cfg(Path(args.config))
+    tr = Telerun(cfg)
+    tr.run_pipeline(args.name)
 
 # ------------------------------
 # Entry point
@@ -734,6 +762,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     sp_eval = sub.add_parser("eval", help="Evaluate all tests: correctness + performance")
     sp_eval.add_argument("--remote", action="store_true", help="Execute on remote host defined in config")
     sp_eval.set_defaults(func=cmd_eval)
+
+    sp_pipe = sub.add_parser("pipe", help="Run a named pipeline from the config")
+    sp_pipe.add_argument("name", help="Pipeline name. e.g. benchmark")
+    sp_pipe.set_defaults(func=cmd_pipe)
 
     args = p.parse_args(argv)
     try:

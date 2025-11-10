@@ -1,0 +1,51 @@
+lab_name: "C++ Hello World Lab"
+source_code_loc: "."
+
+build:
+  build_script: scripts/build.sh
+  eval_binary: ./hello_world_eval
+
+run_command: ./hello_world
+
+thresholds:
+  correctness: diff
+  perf_ms: 1000
+
+slurm:
+  enabled: true
+  partition: batch
+  time: "00:10:00"
+  nodes: 1
+  mem: 0
+  exclusive: true
+
+tests:
+  - name: small
+    args: ["test"]
+    expected_output: "hello world1\n"
+  - name: medium
+    args: ["--size", "500000"]
+    # expected_file: "./temp.txt"
+
+pipelines:
+  benchmark:
+    - name: sync to cluster
+      kind: sync
+      remote: false
+      continue_on_error: false
+
+    - name: remote build
+      kind: build
+      remote: true
+
+    - name: run small
+      kind: run
+      remote: true
+      test: small
+
+    - name: evaluate all
+      kind: eval
+      remote: true
+
+# env:
+  # OMP_NUM_THREADS: "8"

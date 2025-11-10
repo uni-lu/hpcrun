@@ -3,3 +3,4 @@ venv/
 telerun.py
 *.yml
 .telerun_logs/
+.git/
