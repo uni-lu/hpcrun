@@ -61,7 +61,7 @@ Here is a example `yml` configuration of `C++ Hello World` lab:
 ```yaml
 lab_name: "C++ Hello World Lab"
 source_code_loc: "."
-pokemon_name: "Pikachu"
+pokemon_name: "Pikachu"              # your pokemon name
 
 build:
   build_script: scripts/build.sh
