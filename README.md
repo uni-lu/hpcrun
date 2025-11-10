@@ -32,13 +32,14 @@ pip install PyYAML paramiko python-dotenv
 
 ## 2) Configuration
 
-First of all, you need a `.env`, below is an example of mine, replace `TELERUN_SSH_USER` and `TELERUN_SSH_KEY_PATH` based on your profile:
+First of all, you need a `.env`, below is an example of mine, replace `TELERUN_SSH_USER`, `TELERUN_POKEMON_NAME` and `TELERUN_SSH_KEY_PATH` based on your profile:
 
 ```dotenv
 TELERUN_SSH_HOST=access-aion.uni.lu
 TELERUN_SSH_USER=whuang
 TELERUN_SSH_PORT=8022
 TELERUN_SSH_KEY_PATH=~/.ssh/id_ed25519
+TELERUN_POKEMON_NAME=Pikachu
 TELERUN_SSH_RSYNC=true
 ```
 
