@@ -740,6 +740,7 @@ def cmd_leaderboard(lab: str, limit: int = 100) -> None:
         ts = _pretty_ts(r.get("ts", ""))
         print(f"{i:<5} {user:<15} {runtime:>15.3f} {ts:>20}")
     print("=" * 60)
+    print("View leaderboard at 👉:", f"https://uni-lu.github.io/hpcrun?lab={lab_encoded}")
 
 # ------------------------------
 # Entry point
