@@ -24,9 +24,11 @@ tests:
   - name: small
     args: ["test"]
     expected_output: "hello world1\n"
+    leaderboard: false
   - name: medium
     args: ["--size", "500000"]
     # expected_file: "./temp.txt"
+    leaderboard: true
 
 pipelines:
   benchmark:
@@ -47,6 +49,7 @@ pipelines:
     - name: evaluate all
       kind: eval
       remote: true
+      submit: true
 
 # env:
   # OMP_NUM_THREADS: "8"

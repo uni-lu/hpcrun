@@ -66,6 +66,7 @@ build:
   build_script: scripts/build.sh
   eval_binary: ./hello_world_eval     # optional: teacher/oracle; omit if none
 
+module_script: scripts/module.sh
 run_command: ./hello_world            # used when build.binary is unset
 
 thresholds:
@@ -87,6 +88,7 @@ tests:
   - name: medium
     args: ["--size", "500000"]
     # expected_file: "./temp.txt"
+    leaderboard: true                   # specify this test case as leaderboard submission test
 
 pipelines:
   benchmark:
@@ -104,6 +106,7 @@ pipelines:
     - name: evaluate all
       kind: eval
       remote: true
+      submit: true                       # submit the performance result after evalution phase.
 ```
 
 ## 3) Commands
@@ -164,4 +167,21 @@ pipelines:
     - name: run small
       kind: run
       test: small
+```
+
+## 5) Leaderboard
+
+In order to submit you solution to leaderboard, add `--submit` when submit:
+```sh
+./telerun.py eval --remote --submit
+```
+
+You can check the result you've submitted afterward, by using this command:
+```sh
+./telerun.py leaderboard <labname>
+```
+For example:
+
+```sh
+./telerun.py leaderboard "C++ Hello World Lab"
 ```

@@ -1,25 +1,7 @@
 #!/usr/bin/env python
 """
 Telerun: a small, portable tool to build, run, and evaluate code
-on local or hpc (SSH) machines.
-
-High-level features (mirrors the diagram):
-- Reads a YAML config that declares: lab name, source dir, build steps,
-  compile/run commands, thresholds, and (optional) SSH/Slurm settings.
-- Optional rsync to a remote host, then build + run there via SSH.
-- Streams stdout/stderr live to the terminal; writes full logs to disk.
-- Evaluates correctness (diff or custom command) and performance (runtime).
-- Clean, defensive error handling with clear messages.
-
-Usage
------
-$ telerun.py init                   # write an example YAML to ./telerun.yml
-$ telerun.py build -c telerun.yml   # build code
-$ telerun.py run   -c telerun.yml   # run a single test
-$ telerun.py eval  -c telerun.yml   # run all tests, check correctness + perf
-$ telerun.py sync  -c telerun.yml   # rsync to remote (if SSH configured)
-
-The config format is documented below in ExampleConfig.
+on hpc machines.
 """
 from __future__ import annotations
 
@@ -30,10 +12,13 @@ import os
 import shlex
 import subprocess as sp
 import sys
+from datetime import datetime, timezone
 import re
 import tempfile
 import textwrap
 import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import yaml
@@ -44,6 +29,7 @@ LOG_DIR.mkdir(exist_ok=True)
 ANSI_RE = re.compile(r"\x1B\[[0-9;]*[A-Za-z]")  # strip terminal color codes
 DEBUG = False
 
+CLOUDFARE_URL = "https://telerun-results.huangweiurob.workers.dev"
 
 # ------------------------------
 # Utilities
@@ -89,6 +75,69 @@ def write_yaml(path: Path, data: Dict[str, Any]) -> None:
                 "PyYAML is not installed. Install it with 'pip install pyyaml' to write YAML."
             )
         path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+def _pretty_ts(ts: str) -> str:
+    """Convert ISO timestamp to 'YYYY-MM-DD HH:MM:SS' (UTC)."""
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ts[:19] 
+
+class KVSubmitError(RuntimeError):
+    pass
+
+def submit_result(
+    submit_url: str,
+    *,
+    lab: str,
+    user: str,
+    runtime_ms: float,
+    token: Optional[str] = None,
+    timeout: float = 10.0,
+    # you can pass through extra fields if your Worker supports them
+    **extra: Any,
+) -> Dict[str, Any]:
+    """
+    Submit a result to Cloudflare Worker.
+    - submit_url: e.g. "https://telerun-results.<zone>.workers.dev/submit"
+    - lab, user, runtime_ms: minimal payload
+    - token: optional Bearer token
+    - timeout: request timeout (seconds)
+    - **extra: any additional JSON fields (e.g. test, correct, perf_ok, details, commit, ts)
+
+    Returns: parsed JSON response (dict). Raises KVSubmitError on failure.
+    """
+    payload = {"lab": lab, "user": user, "runtime_ms": float(runtime_ms)}
+    payload.update(extra)
+
+    body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    req = urllib.request.Request(submit_url, data=body, headers=headers, method="POST")
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read().decode("utf-8", errors="replace")
+            try:
+                return json.loads(data) if data else {}
+            except json.JSONDecodeError:
+                raise KVSubmitError(f"Non-JSON response: HTTP {resp.status} — {data[:300]}")
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        try:
+            err_json = json.loads(err_body)
+        except json.JSONDecodeError:
+            err_json = {"error": err_body.strip() or e.reason}
+        raise KVSubmitError(f"HTTP {e.code}: {err_json}") from None
+    except urllib.error.URLError as e:
+        raise KVSubmitError(f"Request failed: {e.reason}") from None
+
 
 
 def print_box(title: str) -> None:
@@ -190,6 +239,7 @@ class TestCase:
     input_file: Optional[str] = None  # or a file path
     expected_output: Optional[str] = None  # inline expected
     expected_file: Optional[str] = None  # or file path
+    leaderboard: bool = False
 
 @dataclasses.dataclass
 class PipeStep:
@@ -199,6 +249,7 @@ class PipeStep:
     test: Optional[str] = None   # for kind=="run"
     env: Dict[str, str] = dataclasses.field(default_factory=dict)
     continue_on_error: bool = False
+    submit: bool = False
 
 @dataclasses.dataclass
 class Pipeline:
@@ -218,9 +269,11 @@ class TelerunConfig:
     tests: List[TestCase] = dataclasses.field(default_factory=list)
     env: Dict[str, str] = dataclasses.field(default_factory=dict)
     pipelines: Dict[str, Pipeline] = dataclasses.field(default_factory=dict)
+    pokemon: str = ""
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "TelerunConfig":
+        env = os.environ
         build = BuildConfig(**(d.get("build", {}) or {}))
         ssh = SSHConfig.from_env()
         thr = Thresholds(**(d.get("thresholds", {}) or {}))
@@ -242,6 +295,7 @@ class TelerunConfig:
             tests=tests,
             pipelines=pipes,
             env=d.get("env", {}),
+            pokemon=env['TELERUN_POKEMON_NAME'] if env.get("TELERUN_POKEMON_NAME") else ""
         )
 
 
@@ -594,7 +648,17 @@ class Telerun:
                     for t in self.cfg.tests:
                         res = self.eval_test(t, remote=step.remote)
                         print(f"{t.name}: correct={res['correct']} perf_ok={res['perf_ok']} time={res['runtime_ms']} ms")
-
+                        if res["correct"] and step.submit and t.leaderboard:
+                            try:
+                                res = submit_result(
+                                    f"{CLOUDFARE_URL}/submit",
+                                    lab=self.cfg.lab_name,
+                                    user=self.cfg.pokemon,
+                                    runtime_ms=res['runtime_ms'],
+                                )
+                                print_box("SUBMIT SUCCESS")
+                            except KVSubmitError as e:
+                                print("Submit failed:", e)
                 else:
                     raise SystemExit(f"Unsupported step kind: {step.kind}")
 
@@ -727,6 +791,17 @@ def cmd_eval(args: argparse.Namespace) -> None:
         if res["details"]:
             print(res["details"])
         print()
+        if res['correct'] and  args.remote and args.submit and t.leaderboard:
+            try:
+                res = submit_result(
+                    f"{CLOUDFARE_URL}/submit",
+                    lab=cfg.lab_name,
+                    user=cfg.pokemon,
+                    runtime_ms=res['runtime_ms'],
+                )
+                print_box("SUBMIT SUCCESS")
+            except KVSubmitError as e:
+                print("Submit failed:", e)
     # Summary
     ok = sum(1 for r in results if r["correct"]) 
     fast = sum(1 for r in results if r["perf_ok"]) 
@@ -738,6 +813,48 @@ def cmd_pipe(args: argparse.Namespace) -> None:
     cfg = load_cfg(Path(args.config))
     tr = Telerun(cfg)
     tr.run_pipeline(args.name)
+
+def cmd_leaderboard(lab: str, limit: int = 100) -> None:
+    """
+    Leaderboard
+    """
+    lab_encoded = urllib.parse.quote(lab, safe="")
+    url = f"{CLOUDFARE_URL}/lab?lab={lab_encoded}&limit={limit}"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as e:
+        print(f"HTTP {e.code} while fetching leaderboard: {e.reason}")
+        return
+    except urllib.error.URLError as e:
+        print(f"Network error: {e.reason}")
+        return
+    except json.JSONDecodeError:
+        print("Invalid JSON response from worker")
+        return
+    
+
+    results: List[Dict[str, Any]] = data.get("telerun") or []
+
+    if not results:
+        print(f"No results found for lab '{lab}'.")
+        return
+
+    # Sort ascending by runtime_ms
+    results.sort(key=lambda r: r.get("runtime_ms", float("inf")))
+
+    # Print nicely formatted table
+    print("=" * 60)
+    print(f"🏆 Leaderboard for lab: {lab}")
+    print("=" * 60)
+    print(f"{'Rank':<5} {'User':<15} {'Runtime (ms)':>15} {'Timestamp':>20}")
+    print("-" * 60)
+    for i, r in enumerate(results, start=1):
+        user = r.get("user", "?")
+        runtime = r.get("runtime_ms", 0)
+        ts = _pretty_ts(r.get("ts", ""))
+        print(f"{i:<5} {user:<15} {runtime:>15.3f} {ts:>20}")
+    print("=" * 60)
 
 # ------------------------------
 # Entry point
@@ -763,11 +880,17 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     sp_eval = sub.add_parser("eval", help="Evaluate all tests: correctness + performance")
     sp_eval.add_argument("--remote", action="store_true", help="Execute on remote host defined in config")
+    sp_eval.add_argument("--submit", action="store_true", help="Submit benchmark result to the leaderboard")
     sp_eval.set_defaults(func=cmd_eval)
 
     sp_pipe = sub.add_parser("pipe", help="Run a named pipeline from the config")
     sp_pipe.add_argument("name", help="Pipeline name. e.g. benchmark")
     sp_pipe.set_defaults(func=cmd_pipe)
+
+    sp_leader = sub.add_parser("leaderboard", help="Show leaderboard for a given lab")
+    sp_leader.add_argument("lab", help="Lab name to query")
+    sp_leader.set_defaults(func=lambda args: cmd_leaderboard(args.lab))
+
 
     args = p.parse_args(argv)
     try:
