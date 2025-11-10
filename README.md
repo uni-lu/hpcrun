@@ -32,14 +32,13 @@ pip install PyYAML paramiko python-dotenv
 
 ## 2) Configuration
 
-First of all, you need a `.env`, below is an example of mine, replace `TELERUN_SSH_USER`, `TELERUN_POKEMON_NAME` and `TELERUN_SSH_KEY_PATH` based on your profile:
+First of all, you need a `.env`, below is an example of mine, replace `TELERUN_SSH_USER` and `TELERUN_SSH_KEY_PATH` based on your profile:
 
 ```dotenv
 TELERUN_SSH_HOST=access-aion.uni.lu
 TELERUN_SSH_USER=whuang
 TELERUN_SSH_PORT=8022
 TELERUN_SSH_KEY_PATH=~/.ssh/id_ed25519
-TELERUN_POKEMON_NAME=Pikachu
 TELERUN_SSH_RSYNC=true
 ```
 
@@ -62,6 +61,7 @@ Here is a example `yml` configuration of `C++ Hello World` lab:
 ```yaml
 lab_name: "C++ Hello World Lab"
 source_code_loc: "."
+pokemon_name: "Pikachu"
 
 build:
   build_script: scripts/build.sh
@@ -195,4 +195,5 @@ Rank  User               Runtime (ms)            Timestamp
 1     Weezing                   1.357  2025-11-10 16:50:35
 2     Pikachu                   1.376  2025-11-10 17:49:44
 ============================================================
+view leaderboard at 👉: https://uni-lu.github.io/hpcrun?lab=C%2B%2B%20Hello%20World%20Lab
 ```
