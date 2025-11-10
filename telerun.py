@@ -210,6 +210,7 @@ class TelerunConfig:
     lab_name: str = ""
     source_code_loc: str = "."
     run_command: Optional[str] = None  # fallback if no binary
+    module_script: Optional[str] = None
     build: BuildConfig = dataclasses.field(default_factory=BuildConfig)
     ssh: SSHConfig = dataclasses.field(default_factory=SSHConfig)
     slurm: SlurmConfig = dataclasses.field(default_factory=SlurmConfig)
@@ -233,6 +234,7 @@ class TelerunConfig:
             lab_name=d.get("lab_name", ""),
             source_code_loc=d.get("source_code_loc", "."),
             run_command=d.get("run_command"),
+            module_script=d.get("module_script"),
             build=build,
             ssh=ssh,
             slurm=SlurmConfig(**(d.get("slurm", {}) or {})),
@@ -426,7 +428,7 @@ class Telerun:
         runs = 10
         cmd = " ".join(shlex.quote(a) for a in argv)
         cmd = (
-            f"source {shlex.quote('scripts/module.sh')} && "
+            (f"source {shlex.quote(self.cfg.module_script)} && " if self.cfg.module_script else "")
             + (
                 f"./bin/hyperfine -N --warmup {warmup} --runs {runs} "
                 f"--export-json result.json -- '{cmd}' > /dev/null"

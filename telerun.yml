@@ -5,6 +5,7 @@ build:
   build_script: scripts/build.sh
   eval_binary: ./hello_world_eval
 
+module_script: scripts/module.sh
 run_command: ./hello_world
 
 thresholds:
