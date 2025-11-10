@@ -32,7 +32,7 @@ pip install PyYAML paramiko python-dotenv
 
 ## 2) Configuration
 
-First of all, you need to a `.env`, below is an example of mine, replace `TELERUN_SSH_USER` and `TELERUN_SSH_KEY_PATH` based on your profile:
+First of all, you need a `.env`, below is an example of mine, replace `TELERUN_SSH_USER` and `TELERUN_SSH_KEY_PATH` based on your profile:
 
 ```dotenv
 TELERUN_SSH_HOST=access-aion.uni.lu
@@ -42,7 +42,21 @@ TELERUN_SSH_KEY_PATH=~/.ssh/id_ed25519
 TELERUN_SSH_RSYNC=true
 ```
 
-Then here is a example `yml` configuration of `C++ Hello World` lab:
+Then you need to configure `scripts/build.sh` and `script/module.sh` to manage your build process. For example in order to benchmark a `hello_world.cpp`, we have:
+
+```sh
+# build.sh
+# For build process, we load the module then compile
+ml compiler/GCC
+g++ -O3 -std=c++20 -o hello_world hello_world.cpp
+```
+```sh
+# module.sh
+# This script will be called before each run.
+ml compiler/GCC
+```
+
+Here is a example `yml` configuration of `C++ Hello World` lab:
 
 ```yaml
 lab_name: "C++ Hello World Lab"
