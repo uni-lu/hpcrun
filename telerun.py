@@ -294,7 +294,7 @@ class TelerunConfig:
             tests=tests,
             pipelines=pipes,
             env=d.get("env", {}),
-            pokemon=env['TELERUN_POKEMON_NAME'] if env.get("TELERUN_POKEMON_NAME") else ""
+            pokemon=d.get("pokemon_name", "")
         )
 
 
@@ -704,6 +704,7 @@ def cmd_leaderboard(lab: str, limit: int = 100) -> None:
     """
     lab_encoded = urllib.parse.quote(lab, safe="")
     url = f"{CLOUDFARE_URL}/lab?lab={lab_encoded}&limit={limit}"
+    print(url)
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
             data = json.load(resp)

@@ -1,5 +1,6 @@
 lab_name: "C++ Hello World Lab"
 source_code_loc: "."
+pokemon_name: "Pikachu"
 
 build:
   build_script: scripts/build.sh
