@@ -366,7 +366,7 @@
       <!-- Right column -->
       <div>
         <div class="nes-container is-dark with-title">
-          <p class="title">Leaderboard</p>
+          <p class="title" id="ldb">Leaderboard</p>
           <table class="nes-table is-bordered is-dark leaderboard-table">
             <colgroup>
               <col style="width:20px"> <!-- Rank -->
@@ -414,6 +414,7 @@
     // Allow runtime overrides via URL parameters
     const params = new URLSearchParams(location.search);
     if (params.get('lab')) CONFIG.lab = params.get('lab');
+    document.getElementById('ldb').textContent = `Leaderboard - ${CONFIG.lab}`;
 
     let leaderboardData = []
     // ====== 模拟 API（保留/替换为真实 fetch 均可） ======
